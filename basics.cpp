@@ -295,13 +295,13 @@ static int spifns_sequence_setvar(const char *szName, const char *szValue) {
     for (unsigned int i=0; i<(sizeof(g_pVarList)/sizeof(*g_pVarList)); i++) {
         if (stricmp(szName,g_pVarList[i].szName)==0) {
             switch (i) {
-            case VARLIST_SPISPORT:{
+            case VARLIST_SPISPORT:
                 if (!spifns_sequence_setvar_spiport(nValue)) {
                     const char szError[]="Couldn't find SPI port";
                     memcpy(g_szErrorString,szError,sizeof(szError));
                     return 1;
                 }
-                                  }break;
+                break;
             case VARLIST_SPICLOCK:
                 if (nValue <= 0)
                     return 1; //ERROR!
