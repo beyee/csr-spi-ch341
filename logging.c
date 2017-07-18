@@ -2,9 +2,9 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <time.h>
-#include <sys/time.h>
 #include "logging.h"
 #include "compat.h"
+#include <windows.h>
 
 static char *log_level_strings[] = {
     "all",
@@ -214,7 +214,7 @@ static uint32_t crc32_tab[] = {
 
 /* CRC32, compatible with XAP flash reads/writes verification checksum */
 static uint32_t
-xap_crc32(const void *buf, ssize_t size)
+xap_crc32(const void *buf, size_t size)
 {
     const uint8_t *p;
     uint32_t crc = 0xffffffff;
@@ -239,7 +239,8 @@ xap_crc32(const void *buf, ssize_t size)
 void _log_msg(const char *func, const char *file, int line,
         uint32_t level, const char *fmt, ...)
 {
-    struct timeval tv;
+    SYSTEMTIME lt;
+
     static char strbuf[1024], timebuf[20], *optp;
     va_list args;
 
@@ -253,20 +254,19 @@ void _log_msg(const char *func, const char *file, int line,
 
     if (log_dest != NULL && level <= log_level)
     {
-        gettimeofday(&tv, NULL);
-        strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&tv.tv_sec));
+        GetLocalTime(&lt);
 
         optp = log_level_strings[level];
 
         if (fmt == NULL || fmt[0] == '\0') {
-            fprintf(log_dest, "%s.%06ld: %s:%s:%d:%s\n", timebuf, tv.tv_usec,
+            fprintf(log_dest, "%02d:%02d:%02d.%06ld: %s:%s:%d:%s\n", lt.wHour, lt.wMinute, lt.wSecond, lt.wMilliseconds,
                     optp, file, line, func);
         } else {
             va_start(args, fmt);
             vsnprintf(strbuf, sizeof(strbuf), fmt, args);
             va_end(args);
 
-            fprintf(log_dest, "%s.%06ld: %s:%s:%d:%s: %s\n", timebuf, tv.tv_usec,
+            fprintf(log_dest, "%02d:%02d:%02d.%06ld: %s:%s:%d:%s: %s\n", lt.wHour, lt.wMinute, lt.wSecond, lt.wMilliseconds,
                     optp, file, line, func, strbuf);
         }
         fflush(log_dest);
@@ -276,8 +276,8 @@ void _log_msg(const char *func, const char *file, int line,
 void _log_hexdump(const char *func, const char *file, int line,
         const void *data, size_t len, const char *fmt, ...)
 {
-    struct timeval tv;
-    static char strbuf[1024], timebuf[20];
+    SYSTEMTIME lt;
+    static char strbuf[1024];
     va_list args;
 
     if (!(log_flags & LOG_FLAGS_DUMP) || data == NULL)
@@ -287,17 +287,16 @@ void _log_hexdump(const char *func, const char *file, int line,
     if (log_dest == NULL)
         return;
 
-    gettimeofday(&tv, NULL);
-    strftime(timebuf, sizeof(timebuf), "%H:%M:%S", localtime(&tv.tv_sec));
+    GetLocalTime(&lt);
 
     if (fmt == NULL || fmt[0] == '\0') {
-        fprintf(log_dest, "%s.%06ld: dump:%s:%d:%s (size=%d, crc32=0x%08x):\n", timebuf, tv.tv_usec,
+        fprintf(log_dest, "%02d:%02d:%02d.%06ld: dump:%s:%d:%s (size=%d, crc32=0x%08x):\n", lt.wHour, lt.wMinute, lt.wSecond, lt.wMilliseconds,
                 file, line, func, (unsigned int)len, xap_crc32(data, len));
     } else {
         va_start(args, fmt);
         vsnprintf(strbuf, sizeof(strbuf), fmt, args);
         va_end(args);
-        fprintf(log_dest, "%s.%06ld: dump:%s:%d:%s: %s (size=%d, crc32=0x%08x):\n", timebuf, tv.tv_usec,
+        fprintf(log_dest, "%02d:%02d:%02d.%06ld: dump:%s:%d:%s: %s (size=%d, crc32=0x%08x):\n", lt.wHour, lt.wMinute, lt.wSecond, lt.wMilliseconds,
                 file, line, func, strbuf, (unsigned int)len, xap_crc32(data, len));
     }
     hexdump(log_dest, data, len);

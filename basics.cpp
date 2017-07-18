@@ -23,11 +23,8 @@
 #define VARLIST_SPICMDREADBITS 5
 #define VARLIST_SPICMDWRITEBITS 6
 #define VARLIST_SPIMAXCLOCK 7
-#define VARLIST_FTDI_BASE_CLOCK 8
-#define VARLIST_FTDI_LOG_LEVEL 9
-#define VARLIST_FTDI_LOG_FILE 10
-#define VARLIST_FTDI_PINOUT 11
-#define VARLIST_FTDI_INTERFACE 12
+#define VARLIST_FTDI_LOG_LEVEL 8
+#define VARLIST_FTDI_LOG_FILE 9
 
 const SPIVARDEF g_pVarList[]={
     {"SPIPORT","1",1},
@@ -37,12 +34,9 @@ const SPIVARDEF g_pVarList[]={
     {"SPICMDBITS","0",0},
     {"SPICMDREADBITS","0",0},
     {"SPICMDWRITEBITS","0",0},
-    {"SPIMAXCLOCK","1000",0},
-    {"FTDI_BASE_CLOCK","2000000",0},
+    {"SPIMAXCLOCK","750",0},
     {"FTDI_LOG_LEVEL","warn",0},
-    {"FTDI_LOG_FILE","stderr",0},
-    {"FTDI_PINOUT","0",0},
-    {"FTDI_INTERFACE","A",0}
+    {"FTDI_LOG_FILE","stderr",0}
 };
 
 int g_nSpiPort=1;
@@ -217,9 +211,9 @@ DLLEXPORT void spifns_enumerate_ports(spifns_enumerate_ports_callback pCallback,
         /* Some apps, CSR86XX ROM ConfigTool 3.0.48 in particular, crash when
          * no ports present. Return some dummy port for it if we can't find
          * any. */
-        LOG(WARN, "No FTDI device found, calling port enum callback "
-                "(1, \"No FTDI device found\", %p)", pData);
-        pCallback(1, "No FTDI device found", pData);
+        LOG(WARN, "No CH341 device found, calling port enum callback "
+                "(1, \"No CH341 device found\", %p)", pData);
+        pCallback(1, "No CH341 device found", pData);
         return;
     }
 
@@ -257,7 +251,7 @@ static int spifns_sequence_write(unsigned short nAddress, unsigned short nLength
     } while (0)
 
     if (!spi_isopen())
-        _ERR_RETURN(SPIERR_NO_LPT_PORT_SELECTED, "No FTDI device selected");
+        _ERR_RETURN(SPIERR_NO_LPT_PORT_SELECTED, "No CH341 device selected");
 
     DUMP(pnInput, nLength << 1, "write16(addr=0x%04x, len16=%d)",
             nAddress, nLength);
@@ -325,16 +319,6 @@ static int spifns_sequence_setvar(const char *szName, const char *szValue) {
                 }
                 spi_set_max_clock((unsigned long)nValue);
                 break;
-
-            case VARLIST_FTDI_BASE_CLOCK:
-                LOG(WARN, "Setting FTDI_BASE_CLOCK is deprecated, use SPIMAXCLOCK instead");
-                if (nValue <= 0) {
-                    const char szError[]="FTDI_BASE_CLOCK value should be positive integer";
-                    memcpy(g_szErrorString,szError,sizeof(szError));
-                    return 1;
-                }
-                spi_set_max_clock((unsigned long)nValue / 2000);
-                break;
             case VARLIST_FTDI_LOG_LEVEL:
                 {
                     char *val, *cp, *tok;
@@ -390,31 +374,6 @@ static int spifns_sequence_setvar(const char *szName, const char *szValue) {
                     }
                 }
                 break;
-            case VARLIST_FTDI_PINOUT:
-                {
-                    enum spi_pinouts pinout;
-
-                    if (!stricmp(szValue, "default")) {
-                        pinout = SPI_PINOUT_DEFAULT;
-                    } else if (!stricmp(szValue, "noleds")) {
-                        pinout = SPI_PINOUT_NOLEDS;
-                    } else if (!stricmp(szValue, "hwspi+leds")) {
-                        pinout = SPI_PINOUT_HWSPI_LEDS;
-                    } else if (!stricmp(szValue, "hwspi")) {
-                        pinout = SPI_PINOUT_HWSPI;
-                    } else {
-                        const char szError[]="Invalid pinout specified in FTDI_PINOUT";
-                        memcpy(g_szErrorString,szError,sizeof(szError));
-                        return 1;
-                    }
-                    spi_set_pinout(pinout);
-                }
-            case VARLIST_FTDI_INTERFACE:
-                if (spi_set_interface(szValue) < 0) {
-                    const char szError[]="Invalid channel specified in FTDI_INTERFACE";
-                    memcpy(g_szErrorString,szError,sizeof(szError));
-                    return 1;
-                }
             }
         }
     }
@@ -437,7 +396,7 @@ static int spifns_sequence_read(unsigned short nAddress, unsigned short nLength,
     } while (0)
 
     if (!spi_isopen())
-        _ERR_RETURN(SPIERR_NO_LPT_PORT_SELECTED, "No FTDI device selected");
+        _ERR_RETURN(SPIERR_NO_LPT_PORT_SELECTED, "No CH341 device selected");
 
 #ifdef ENABLE_LEDS
     spi_led(SPI_LED_READ);
@@ -663,7 +622,7 @@ DLLEXPORT void spifns_stream_set_debug_callback(spifns_stream_t stream, spifns_d
 DLLEXPORT int spifns_stream_get_device_id(spifns_stream_t stream, char *buf, size_t length)
 {
     LOG(DEBUG, "(%d, %p, %u)", stream, buf, length);
-    snprintf(buf, length, "csr-spi-ftdi-%d", STREAM);
+    snprintf(buf, length, "csr-spi-ch341-%d", STREAM);
     return 0;
 }
 

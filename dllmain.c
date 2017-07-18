@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <tchar.h>
 #include "spi.h"
 
 typedef uint32_t (pttrans_get_version_t)(void);
@@ -17,7 +18,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
             DisableThreadLibraryCalls(hinstDLL);
 
             /* Detect SPI API version by calling a function from pttransport.dll */
-            if ((pttdll = GetModuleHandle("pttransport.dll"))) {
+            if ((pttdll = GetModuleHandle(_T("pttransport.dll")))) {
                 if ((pttrans_get_version = (pttrans_get_version_t *)GetProcAddress(pttdll,
                                 "pttrans_get_version")))
                 {
