@@ -16,11 +16,37 @@ struct spi_port {
     char name[256];
 };
 
+struct spi_pins {
+	uint8_t ncs, clk, mosi, miso;
+};
+
+/*
+* Pinouts. Change at will. Beware that FTDI adapters provide 5V or 3V3 I/O
+* levels, but CSR chips require 3V3 or 1V8 I/O level.
+*/
+
+/*
+* Default pinout, this leaves TX and RX pins free for UART connection.
+*
+* CS - D0, CLK - D3, MOSI - D5, MISO - D7
+*/
+#define SPI_PIN_PRESET_DEFAULT \
+    { (1 << 0), (1 << 3), (1 << 5), (1 << 7) }
+
+#define SPI_PIN_PRESETS { \
+        SPI_PIN_PRESET_DEFAULT, \
+    }
+
+enum spi_pinouts {
+	SPI_PINOUT_DEFAULT = 0,
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void spi_set_err_buf(char *buf, size_t sz);
+void spi_set_pinout(enum spi_pinouts pinout);
 int spi_init(void);
 int spi_deinit(void);
 int spi_get_port_list(struct spi_port **pportlist, int *pnports);

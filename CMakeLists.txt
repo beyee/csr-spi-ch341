@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.1.0)
 
-project (CSR-SPI-CH341)
+project (usbspi)
 
 if (NOT DEFINED CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)

@@ -18,14 +18,15 @@
 /* Default SPI clock rate, in kHz */
 #define SPIMAXCLOCK     750
 
-static uint8_t *ch_out_buf = NULL, *ch_in_buf = NULL;
-static size_t ch_buf_size = 0;
-static unsigned int ch_out_buf_offset;
+static uint8_t *ch341_in_out_buf = NULL;
+static size_t ch341_buf_size = 0;
+static unsigned int ch341_in_out_buf_offset;
 
 static int spi_dev_open = 0;
 static int spi_nrefs = 0;
 
 static int ch341_index = -1;
+static uint8_t ch341_pin_state = 0;
 
 #ifdef SPI_STATS
 static struct spi_stats {
@@ -47,6 +48,10 @@ unsigned long spi_clock = 0, spi_max_clock = SPIMAXCLOCK;
 
 static char *spi_err_buf = NULL;
 static size_t spi_err_buf_sz = 0;
+
+static struct spi_pins *spi_pins;
+static struct spi_pins spi_pin_presets[] = SPI_PIN_PRESETS;
+static enum spi_pinouts spi_pinout = SPI_PINOUT_DEFAULT;
 
 void spi_set_err_buf(char *buf, size_t sz)
 {
@@ -81,17 +86,11 @@ static void spi_err(const char *fmt, ...) {
  * CH341 transfer data forth and back in synchronous mode
  */
 
-static int spi_ch_xfer(uint8_t *out_buf, uint8_t *in_buf, int size)
+static int spi_ch_xfer(uint8_t *in_out_buf, int size)
 {
     BOOL rc;
-    uint8_t *bufp;
-    int len;
-    int lost_buffer_counter = 0;
 
-    // We need to copy the buffer from out_buf to in_buf.
-    memcpy(in_buf, out_buf, size);
-
-    rc = USBIO_StreamSPI4(ch341_index, 0x80, size, in_buf);
+    rc = USBIO_BitStreamSPI(ch341_index, size, in_out_buf);
     if (!rc) {
         SPI_ERR("CH341: write data failed: [%d]", rc);
         return -1;
@@ -130,24 +129,27 @@ int spi_xfer_begin(int get_status)
         LOG(WARN, "gettimeofday failed: %s", strerror(errno));
 #endif
 
-    /* Check if there is enough space in the buffer */
-    if (ch_buf_size - ch_out_buf_offset < 7) {
-        /* There is no room in the buffer for the following operations, flush
-         * the buffer */
-        if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-            return -1;
-        /* The data in the buffer is useless, discard it */
-        ch_out_buf_offset = 0;
-    }
+	/* Check if there is enough space in the buffer */
+	if (ch341_buf_size - ch341_in_out_buf_offset < 3) {
+		/* There is no room in the buffer for the following operations, flush
+		* the buffer */
+		if (spi_ch_xfer(ch341_in_out_buf, ch341_in_out_buf_offset) < 0)
+			return -1;
+		/* The data in the buffer is useless, discard it */
+		ch341_in_out_buf_offset = 0;
+	}
 
     /* BlueCore chip SPI port reset sequence: deassert CS, wait at least two
      * clock cycles */
-	ch_out_buf[ch_out_buf_offset++] = 0;
-	ch_out_buf[ch_out_buf_offset++] = 0;
+	
+	ch341_pin_state |= spi_pins->ncs;
+	ch341_in_out_buf[ch341_in_out_buf_offset++] = ch341_pin_state;
+
+	// At least two clock.
+	ch341_in_out_buf[ch341_in_out_buf_offset++] = ch341_pin_state;
 
     /* Start transfer */
-
-	ch_out_buf[ch_out_buf_offset++] = 0;
+	ch341_pin_state &= ~spi_pins->ncs;
 
     if (get_status) {
         /*
@@ -160,20 +162,19 @@ int spi_xfer_begin(int get_status)
          * sources I consulted (CsrSpiDrivers and CsrUsbSpiDeviceRE) are
          * reading the status after setting CS# to 0.
          */
-
-        status_offset = ch_out_buf_offset;
-		ch_out_buf[ch_out_buf_offset++] = 0;
-
-        if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
+		
+		status_offset = ch341_in_out_buf_offset - 1;
+		
+        if (spi_ch_xfer(ch341_in_out_buf, ch341_in_out_buf_offset) < 0)
             return -1;
 
-        if (ch_in_buf[status_offset] & 0x1)
+        if (ch341_in_out_buf[status_offset] & spi_pins->miso)
             status = SPI_CPU_STOPPED;
         else
             status = SPI_CPU_RUNNING;
 
         /* Other data in the buffer is useless, discard it */
-        ch_out_buf_offset = 0;
+		ch341_in_out_buf_offset = 0;
 
         return status;
     }
@@ -185,23 +186,8 @@ int spi_xfer_end(void)
 {
     LOG(DEBUG, "");
 
-    /* Check if there is enough space in the buffer */
-    if (ch_buf_size - ch_out_buf_offset < 2) {
-        /* There is no room in the buffer for the following operations, flush
-         * the buffer */
-        if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-            return -1;
-        /* The data in the buffer is useless, discard it */
-        ch_out_buf_offset = 0;
-    }
-
     /* Commit the last ch_pin_state after spi_xfer() */
-    ch_out_buf[ch_out_buf_offset++] = 0;
-
-    ch_out_buf[ch_out_buf_offset++] = 0;
-
     /* Buffer flush is done on close */
-
 #ifdef SPI_STATS
     {
         struct timeval tv;
@@ -217,91 +203,85 @@ int spi_xfer_end(void)
 
 int spi_xfer(int cmd, int iosize, void *buf, int size)
 {
-    unsigned int write_offset, read_offset, ch_in_buf_offset;
-    uint16_t bit, word;
+	unsigned int write_offset, read_offset, ch341_in_buf_offset;
+	uint16_t bit, word;
 
-    LOG(DEBUG, "(%d, %d, %p, %d)", cmd, iosize, buf, size);
+	LOG(DEBUG, "(%d, %d, %p, %d)", cmd, iosize, buf, size);
 
-    write_offset = 0;
-    read_offset = 0;
+	write_offset = 0;
+	read_offset = 0;
 
-    do {
-        /* The read, if any, will start at current buffer offset */
-        ch_in_buf_offset = ch_out_buf_offset;
+	do {
+		/* In FTDI sync bitbang mode we need to write something to device to
+		* toggle a read. */
 
-        while (write_offset < size) {
-            /* 2 bytes per bit */
-            if (ch_buf_size - ch_out_buf_offset < iosize * 2) {
-                /* There is no room in the buffer for following word write,
-                 * flush the buffer */
-                if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-                    return -1;
-                ch_out_buf_offset = 0;
+		/* The read, if any, will start at current buffer offset */
+		ch341_in_buf_offset = ch341_in_out_buf_offset;
 
-                /* Let following part to parse from ch_in_buf if needed */
-                break;
-            }
+		while (write_offset < size) {
+			/* 2 bytes per bit */
+			if (ch341_buf_size - ch341_in_out_buf_offset < iosize) {
+				/* There is no room in the buffer for following word write,
+				* flush the buffer */
+				if (spi_ch_xfer(ch341_in_out_buf, ch341_in_out_buf_offset) < 0)
+					return -1;
+				ch341_in_out_buf_offset = 0;
 
-            if (iosize == 8)
-                word = ((uint8_t *)buf)[write_offset];
-            else
-                word = ((uint16_t *)buf)[write_offset];
+				/* Let following part to parse from ftdi_in_buf if needed */
+				break;
+			}
 
-            /* MOSI is sensed by BlueCore on the rising edge of CLK, MISO is
-             * changed on the falling edge of CLK. */
-            for (bit = (1 << (iosize - 1)); bit != 0; bit >>= 1) {
-                if (cmd & SPI_XFER_WRITE) {
-                    /* Set output bit */
-                    if (word & bit)
-                        ch_pin_state |= spi_pins->mosi;
-                    else
-                        ch_pin_state &= ~spi_pins->mosi;
-                } else {
-                    /* Write 0 during a read */
-                    ch_pin_state &= ~spi_pins->mosi;
-                }
+			if (iosize == 8)
+				word = ((uint8_t *)buf)[write_offset];
+			else
+				word = ((uint16_t *)buf)[write_offset];
 
-                ch_out_buf[ch_out_buf_offset++] = ch_pin_state;
+			/* MOSI is sensed by BlueCore on the rising edge of CLK, MISO is
+			* changed on the falling edge of CLK. */
+			for (bit = (1 << (iosize - 1)); bit != 0; bit >>= 1) {
+				if (cmd & SPI_XFER_WRITE) {
+					/* Set output bit */
+					if (word & bit)
+						ch341_pin_state |= spi_pins->mosi;
+					else
+						ch341_pin_state &= ~spi_pins->mosi;
+				} else {
+					/* Write 0 during a read */
+					ch341_pin_state &= ~spi_pins->mosi;
+				}
 
-                /* Clock high */
-                ch_pin_state |= spi_pins->clk;
-                ch_out_buf[ch_out_buf_offset++] = ch_pin_state;
+				ch341_in_out_buf[ch341_in_out_buf_offset++] = ch341_pin_state;
+			}
+			write_offset++;
+		}
 
-                /* Clock low */
-                ch_pin_state &= ~spi_pins->clk;
-            }
-            write_offset++;
-        }
+		if (cmd & SPI_XFER_READ) {
+			if (ch341_in_out_buf_offset) {
+				if (spi_ch_xfer(ch341_in_out_buf, ch341_in_out_buf_offset) < 0)
+					return -1;
+				ch341_in_out_buf_offset = 0;
+			}
+			while (read_offset < write_offset) {
+				word = 0;
+				for (bit = (1 << (iosize - 1)); bit != 0; bit >>= 1) {
+					/* Input bit */
+					if (ch341_in_out_buf[ch341_in_buf_offset] & spi_pins->miso)
+						word |= bit;
+					ch341_in_buf_offset++;
+				}
 
-        if (cmd & SPI_XFER_READ) {
-            if (ch_out_buf_offset) {
-                if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-                    return -1;
-                ch_out_buf_offset = 0;
-            }
-            while (read_offset < write_offset) {
-                word = 0;
-                for (bit = (1 << (iosize - 1)); bit != 0; bit >>= 1) {
-                    /* Input bit */
-                    ch_in_buf_offset++;
-                    if (ch_in_buf[ch_in_buf_offset] & spi_pins->miso)
-                        word |= bit;
-                    ch_in_buf_offset++;
-                }
+				if (iosize == 8)
+					((uint8_t *)buf)[read_offset] = (uint8_t)word;
+				else
+					((uint16_t *)buf)[read_offset] = word;
 
-                if (iosize == 8)
-                    ((uint8_t *)buf)[read_offset] = (uint8_t)word;
-                else
-                    ((uint16_t *)buf)[read_offset] = word;
-
-                read_offset++;
-            }
-            /* Reading done, reset buffer */
-            ch_out_buf_offset = 0;
-            ch_in_buf_offset = 0;
-        }
-
-    } while (write_offset < size);
+				read_offset++;
+			}
+			/* Reading done, reset buffer */
+			ch341_in_out_buf_offset = 0;
+			ch341_in_buf_offset = 0;
+		}
+	} while (write_offset < size);
 
 #ifdef SPI_STATS
     if (cmd & SPI_XFER_WRITE) {
@@ -319,7 +299,7 @@ int spi_xfer(int cmd, int iosize, void *buf, int size)
 /* Fills spi_ports array with discovered devices, sets spi_nports */
 static int spi_enumerate_ports(void)
 {
-    int id, index;
+    int index;
     const char* name = NULL;
 
     spi_nports = 0;
@@ -351,7 +331,7 @@ int spi_init(void)
         return -1;
     }
 
-    spi_pins = &spi_pin_presets[spi_pinout];
+	spi_pins = &spi_pin_presets[spi_pinout];
 
     return 0;
 }
@@ -410,14 +390,6 @@ int spi_set_clock(unsigned long spi_clk) {
     }
 
     spi_clock = spi_clk;
-
-    /* Flush the write buffer before setting clock */
-    if (ch_out_buf_offset) {
-        if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-            return -1;
-        /* The data in the buffer is useless, discard it */
-        ch_out_buf_offset = 0;
-    }
 
     LOG(INFO, "CH341: setting SPI clock to %lu (CH341 mode %lu)", spi_clk, mode_word);
     rc = USBIO_SetStream(ch341_index, mode_word);
@@ -478,9 +450,8 @@ unsigned long spi_get_clock(void) {
 int spi_open(int nport)
 {
     BOOL rc;
-    char *serial;
-    uint8_t output_pins;
-
+	uint8_t output_pins;
+    
     LOG(DEBUG, "(%d) spi_dev_open=%d", nport, spi_dev_open);
 
     if (spi_dev_open > 0) {
@@ -510,30 +481,29 @@ int spi_open(int nport)
         goto open_err;
     }
 
-    spi_dev_open++;
+	spi_dev_open++;
 
 	LOG(INFO, "CH341: using CH341 device: \"%s\"", spi_ports[nport].name);
 
-	ch_buf_size = 8192;
+	ch341_index = spi_ports[nport].ch341_index;
 
-    /* Initialize xfer buffers */
-    ch_out_buf = malloc(ch_buf_size);
-    ch_in_buf = malloc(ch_buf_size);
-    if (ch_out_buf == NULL || ch_in_buf == NULL) {
-        SPI_ERR("Not enough memory");
-        goto open_err;
-    }
-    ch_out_buf_offset = 0;
+	/* Set pins direction */
+	output_pins = spi_pins->mosi | spi_pins->clk | spi_pins->ncs;
+	/* Set initial pin state: CS high, MISO high as pullup, MOSI and CLK low, LEDs off */
+	rc = USBIO_Set_D5_D0(spi_ports[nport].ch341_index, output_pins, spi_pins->ncs | spi_pins->miso);
+	if (rc < 0) {
+		SPI_ERR("CH341: set synchronous bitbang mode failed.");
+		goto open_err;
+	}
 
-    /* Set initial pin state: CS high, MISO high as pullup, MOSI and CLK low, LEDs off */
-    ch_pin_state = spi_pins->ncs | spi_pins->miso;
-    if (spi_pins->nledr)
-        ch_pin_state |= spi_pins->nledr;
-    if (spi_pins->nledw)
-        ch_pin_state |= spi_pins->nledw;
-    ch_out_buf[ch_out_buf_offset++] = ch_pin_state;
-
-    ch341_index = spi_ports[nport].ch341_index;
+	/* Initialize xfer buffers */
+	ch341_buf_size = 896;
+	ch341_in_out_buf = malloc(ch341_buf_size);
+	if (ch341_in_out_buf == NULL) {
+		SPI_ERR("Not enough memory");
+		goto open_err;
+	}
+	ch341_in_out_buf_offset = 0;
 
     return 0;
 
@@ -624,15 +594,12 @@ int spi_close(void)
     LOG(DEBUG, "spi_nrefs=%d, spi_dev_open=%d", spi_nrefs, spi_dev_open);
 
     if (spi_dev_open) {
-#ifdef ENABLE_LEDS
-        spi_led(SPI_LED_OFF);
-#endif
-        /* Flush and reset the buffers */
-        if (ch_out_buf_offset) {
-            if (spi_ch_xfer(ch_out_buf, ch_in_buf, ch_out_buf_offset) < 0)
-                return -1;
-            ch_out_buf_offset = 0;
-        }
+		/* Flush and reset the buffers */
+		if (ch341_in_out_buf_offset) {
+			if (spi_ch_xfer(ch341_in_out_buf, ch341_in_out_buf_offset) < 0)
+				return -1;
+			ch341_in_out_buf_offset = 0;
+		}
 
         USBIO_CloseDevice(ch341_index);
 
@@ -640,10 +607,9 @@ int spi_close(void)
         spi_output_stats();
 #endif
 
-        free(ch_out_buf);
-        free(ch_in_buf);
-        ch_out_buf = ch_in_buf = NULL;
-        ch_buf_size = 0;
+		free(ch341_in_out_buf);
+		ch341_in_out_buf = NULL;
+		ch341_buf_size = 0;
 
         spi_dev_open = 0;
     }
